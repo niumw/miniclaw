@@ -105,15 +105,21 @@ class MemoryRetriever:
         return "\n".join(parts) if len(parts) > 1 else ""
 
     def _extract_keywords(self, text: str) -> list[str]:
-        """从用户输入中提取关键词"""
+        """从用户输入中提取关键词（改进中文支持）
+
+        策略：
+        1. 英文：按词提取
+        2. 中文：2-4字 n-gram + 实体短语
+        3. 过滤停用词
+        """
+        import re
         stop_words = {"的", "了", "是", "在", "我", "你", "他", "她", "它", "这", "那", "有", "不",
                        "也", "都", "就", "要", "会", "可以", "能", "请", "帮", "给", "让", "和",
                        "与", "或", "但", "而", "如果", "因为", "所以", "什么", "怎么", "如何",
                        "为什么", "哪", "哪个", "多少", "几", "吗", "呢", "吧", "啊", "嗯",
-                       "了没", "一下", "一个", "什么", "是不是", "有没有"}
+                       "了没", "一下", "一个", "是不是", "有没有", "告诉", "知道", "看看",
+                       "帮我", "帮我看看", "我想", "我想问", "请问", "查询"}
 
-        # 中文分词：用滑动窗口提取 2-4 字的词组
-        import re
         keywords = []
 
         # 先用标点和英文空格分割
@@ -123,21 +129,30 @@ class MemoryRetriever:
             seg = seg.strip()
             if not seg:
                 continue
-            # 纯英文/数字/符号段，直接作为关键词
+            # 纯英文/数字/符号段
             if re.match(r'^[a-zA-Z0-9_.\-:/]+$', seg):
                 if seg not in stop_words and len(seg) >= 2:
                     keywords.append(seg)
                 continue
-            # 中文段：滑动窗口提取 2-4 字词组
+            # 中文段
+            # 1. 短词直接保留
             if len(seg) <= 4 and seg not in stop_words:
                 keywords.append(seg)
-            else:
-                # 提取 2-4 字的 n-gram，过滤停用词
+            # 2. n-gram 提取（2-4字）
+            if len(seg) >= 2:
                 for n in (4, 3, 2):
                     for i in range(len(seg) - n + 1):
                         gram = seg[i:i+n]
                         if gram not in stop_words and not all(c in stop_words for c in gram):
                             keywords.append(gram)
+
+        # 3. 从实体模式中提取关键短语（IP、URL、域名等）
+        from miniclaw.memory.extractor import ENTITY_PATTERNS
+        for pattern in ENTITY_PATTERNS:
+            for match in pattern.finditer(text):
+                matched = match.group(1) if match.lastindex else match.group(0)
+                if matched and len(matched) >= 3:
+                    keywords.append(matched)
 
         # 去重，保留顺序
         seen = set()
@@ -147,4 +162,4 @@ class MemoryRetriever:
                 seen.add(k)
                 unique.append(k)
 
-        return unique[:8]
+        return unique[:10]

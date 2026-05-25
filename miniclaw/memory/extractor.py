@@ -103,6 +103,7 @@ class MemoryExtractor:
                 candidates.append(mem)
 
         # 规则5：有价值的陈述（包含实体或技术关键词，但不属于上述规则）
+        # 即使有候选记忆，也检查是否遗漏了有价值的隐含信息
         if not candidates and self._is_valuable_statement(user_input):
             mem = self._build_memory(
                 user_input, assistant_reply,
@@ -175,21 +176,45 @@ class MemoryExtractor:
         return any(m in text for m in pref_marks)
 
     def _is_valuable_statement(self, text: str) -> bool:
-        """判断是否包含有价值的技术信息（但不属于其他规则）"""
+        """判断是否包含有价值的技术信息（但不属于其他规则）
+
+        覆盖场景：
+        1. 包含实体信息（IP/URL/域名等）
+        2. 包含因果/技术关键词
+        3. 包含隐性有价值陈述（"项目用XX写的"、"这个bug是因为XX"）
+        4. 包含版本/环境/架构等技术描述
+        """
         # 有实体信息
         entities = self._extract_entities(text, "")
         if entities:
             return True
-        # 包含因果/技术关键词
+
+        # 因果/技术关键词
         tech_keywords = [
             "因为", "导致", "原因是", "解决", "修复", "配置", "部署", "安装",
             "版本", "环境", "框架", "架构", "协议", "算法", "接口", "服务",
             "数据库", "缓存", "队列", "集群", "容器", "模块", "组件",
-            "用的", "写的", "开发的", "基于", "运行在", "使用",
             "Python", "Java", "Go", "Rust", "Node", "React", "Vue",
             "Docker", "K8s", "Linux", "MySQL", "Redis", "Nginx",
         ]
-        return any(k in text for k in tech_keywords)
+        if any(k in text for k in tech_keywords):
+            return True
+
+        # 隐性有价值陈述模式
+        implicit_patterns = [
+            r'(?:项目|程序|服务|系统|代码)(?:用|是|基于|运行在|使用|写的|开发的)',
+            r'(?:这个|那个)?(?:bug|问题|错误|故障)(?:是因为|由于|因为|根源)',
+            r'(?:需要|必须|应该|最好)(?:用|使用|配置|设置|安装)',
+            r'(?:服务器|机器|节点|集群)(?:是|有|在|运行)',
+            r'(?:版本|环境|系统)(?:是|用|为|升级到)',
+            r'(?:不支持|不兼容|不支持|无法)(?:\w+)',
+        ]
+        import re
+        for pattern in implicit_patterns:
+            if re.search(pattern, text):
+                return True
+
+        return False
 
     def _build_memory(
         self,

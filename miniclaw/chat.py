@@ -587,15 +587,47 @@ def _print_memories(store: MemoryStore):
 
 
 def _memories_similar(a, b) -> bool:
-    """判断两条记忆是否相似（去重用）"""
+    """判断两条记忆是否相似（去重用）
+
+    改进策略（替代原来的 summary 完全相等）：
+    1. summary 完全相等 → 相似
+    2. summary 关键词重叠度 > 0.5 → 相似
+    3. 实体有交集 + summary 有部分重叠 → 相似
+    """
     if a.summary == b.summary:
         return True
+
+    # 提取关键词（简单分词：中文按字/英文按词）
+    def tokenize(text):
+        import re
+        # 英文词
+        en_words = set(re.findall(r'[a-zA-Z]{2,}', text.lower()))
+        # 中文片段（2-4字的滑窗）
+        cn_chars = re.findall(r'[\u4e00-\u9fff]+', text)
+        cn_ngrams = set()
+        for seg in cn_chars:
+            for n in range(2, min(5, len(seg) + 1)):
+                for i in range(len(seg) - n + 1):
+                    cn_ngrams.add(seg[i:i+n])
+        return en_words | cn_ngrams
+
+    words_a = tokenize(a.summary)
+    words_b = tokenize(b.summary)
+
+    if not words_a or not words_b:
+        return False
+
+    # Jaccard 相似度
+    overlap = len(words_a & words_b) / max(len(words_a | words_b), 1)
+
+    # 策略1: 关键词重叠度高
+    if overlap > 0.5:
+        return True
+
+    # 策略2: 实体有交集 + 部分重叠
     if a.entities and b.entities:
         common = set(a.entities) & set(b.entities)
-        if common:
-            words_a = set(a.summary)
-            words_b = set(b.summary)
-            overlap = len(words_a & words_b) / max(len(words_a | words_b), 1)
-            if overlap > 0.6:
-                return True
+        if common and overlap > 0.2:
+            return True
+
     return False
