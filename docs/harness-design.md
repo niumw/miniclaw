@@ -454,6 +454,17 @@ actual_args = resolve_templates(step_2.args, plan.context)
 - v0.6.0：计划在内存中，进程结束即消失
 - v0.7.0：SQLite 持久化，支持断点续执行
 
+### Q5: 记忆在 Harness 中如何自动产生？
+
+**决策：观察者模式，MemoryObserver 监听执行全生命周期。**
+
+- 不让 Executor 自己管记忆（职责分离）
+- 每个执行阶段（步骤完成/失败/重规划/护栏拦截/计划完成）自动触发记忆提取
+- 失败比成功更值得记（失败 importance +0.2）
+- 记忆反向影响规划：历史教训 → 自动注入约束
+
+详见第十一章"记忆与 Harness 的集成"。
+
 ---
 
 ## 八、v0.6.0 实现优先级
@@ -461,15 +472,16 @@ actual_args = resolve_templates(step_2.args, plan.context)
 | 优先级 | 模块 | 工作量 | 说明 |
 |--------|------|--------|------|
 | P0 | `plan.py` 数据模型 | 2h | Plan/Step/Constraint 定义 |
-| P0 | `planner.py` 规划器 | 4h | 模型拆解 + 默认护栏 |
+| P0 | `planner.py` 规划器 | 4h | 模型拆解 + 默认护栏 + 记忆检索 |
 | P0 | `executor.py` 执行器 | 4h | 步骤执行 + context 传递 |
+| P0 | `memory_observer.py` | 3h | 执行过程自动记忆提取 |
 | P1 | `guardrails.py` 护栏 | 3h | 安全检查 + 用户确认 |
 | P1 | `replanner.py` 重规划 | 3h | 失败反思 + 策略选择 |
-| P2 | `reporter.py` 报告器 | 2h | 报告格式 + 经验保存 |
+| P2 | `reporter.py` 报告器 | 2h | 报告格式 |
 | P1 | `router.py` 扩展 | 2h | 复杂度评估 + harness 标记 |
 | P1 | `chat.py` 扩展 | 2h | Harness 入口 |
 
-**总工作量估算**：~22h（约3个工作日）
+**总工作量估算**：~25h（约3.5个工作日）
 
 ---
 
@@ -508,7 +520,186 @@ Plan:
 
 ---
 
-## 十、与 v0.7.0 的衔接
+## 十、记忆与 Harness 的集成
+
+### 10.1 核心原则
+
+**Harness 的每一步执行，等价于一次迷你对话。每一步都应该经过记忆提取器。**
+
+记忆不是事后补录，而是在执行全过程中自动采集。
+
+### 10.2 记忆采集点
+
+| 执行阶段 | 产生什么 | 记忆类型 | 优先级 |
+|---------|---------|---------|--------|
+| 规划 | 拆解策略（为什么这么拆） | knowledge | 低 |
+| 步骤成功 | 执行结果中的事实 | data/info | 中 |
+| 步骤失败 | 失败原因 | info | **高** |
+| 重规划 | 什么策略救了回来 | knowledge/wisdom | **高** |
+| 护栏拦截 | 被拦了什么+为什么 | lesson | **最高** |
+| 计划完成 | 目标是否达成+总结 | knowledge | 中 |
+
+**失败比成功更值得记。护栏事件优先级最高。**
+
+### 10.3 MemoryObserver（记忆观察者）
+
+采用观察者模式——Executor 只管执行，MemoryObserver 负责从过程中提取记忆：
+
+```python
+class MemoryObserver:
+    """观察 Harness 执行过程，自动提取记忆"""
+
+    def __init__(self, extractor: Extractor, store: MemoryStore):
+        self.extractor = extractor
+        self.store = store
+
+    def on_step_complete(self, step: Step, plan: Plan):
+        """步骤完成 → 从结果中提取记忆"""
+        result_text = self._format_step_result(step, plan)
+        memories = self.extractor.extract(result_text, context=plan.goal)
+        for mem in memories:
+            mem.importance = self._adjust_importance(mem, step, plan)
+            mem.source = f"harness:{plan.id}:{step.id}"
+            self.store.save(mem)
+
+    def on_step_failed(self, step: Step, plan: Plan, error: str):
+        """步骤失败 → 强制生成失败记忆（失败默认高优先级）"""
+        memory = Memory(
+            content=f"执行'{step.description}'失败: {error}",
+            memory_type="lesson",
+            importance=0.8,
+            entities=self.extractor.extract_entities(error),
+            source=f"harness:{plan.id}:{step.id}",
+        )
+        self.store.save(memory)
+
+    def on_replan(self, plan: Plan, failed_step: Step,
+                  strategy: str, new_steps: list[Step]):
+        """重规划 → 记录策略选择"""
+        memory = Memory(
+            content=f"步骤'{failed_step.description}'失败后，采用{strategy}策略继续",
+            memory_type="knowledge",
+            importance=0.7,
+            entities=self.extractor.extract_entities(failed_step.description),
+            source=f"harness:{plan.id}:replan",
+        )
+        self.store.save(memory)
+
+    def on_guardrail_triggered(self, step: Step, guard_result: GuardResult):
+        """护栏拦截 → 安全事件最高优先级"""
+        memory = Memory(
+            content=f"护栏拦截: {guard_result.reason}",
+            memory_type="lesson",
+            importance=0.9,
+            entities=[],
+            source=f"harness:guardrail:{step.id}",
+        )
+        self.store.save(memory)
+
+    def on_plan_complete(self, result: ExecutionResult, plan: Plan):
+        """计划完成 → 生成总结性记忆"""
+        summary = (
+            f"目标'{plan.goal}'成功完成，{result.steps_completed}步"
+            if result.success
+            else f"目标'{plan.goal}'未完成，{result.steps_failed}步失败"
+        )
+        memory = Memory(
+            content=summary,
+            memory_type="knowledge",
+            importance=0.6 if result.success else 0.8,
+            entities=self.extractor.extract_entities(plan.goal),
+            source=f"harness:{plan.id}:summary",
+        )
+        self.store.save(memory)
+
+    def _adjust_importance(self, memory: Memory, step: Step, plan: Plan) -> float:
+        """根据执行上下文调整优先级"""
+        base = memory.importance
+        if step.status == "failed":
+            base = min(base + 0.2, 1.0)        # 失败 +0.2
+        if step.id in [d for s in plan.steps for d in s.depends_on]:
+            base = min(base + 0.1, 1.0)        # 被依赖的步骤 +0.1
+        if memory.entities:
+            base = min(base + 0.1, 1.0)        # 包含实体 +0.1
+        return base
+
+    def _format_step_result(self, step: Step, plan: Plan) -> str:
+        """格式化步骤结果，供提取器处理"""
+        parts = [f"目标: {plan.goal}", f"步骤: {step.description}", f"状态: {step.status}"]
+        if step.result:
+            parts.append(f"结果: {step.result}")
+        if step.reflection:
+            parts.append(f"反思: {step.reflection}")
+        return "\n".join(parts)
+```
+
+### 10.4 记忆反向影响规划
+
+记住不是目的，下次能用到才是。Planner 规划时检索历史记忆：
+
+```python
+class Planner:
+    def plan(self, goal: str, context: dict) -> Plan:
+        # 1. 搜索相关记忆
+        related = self.memory_store.search(goal, limit=5)
+
+        # 2. 从记忆中提取约束
+        memory_constraints = []
+        for mem in related:
+            if mem.memory_type == "lesson":
+                # 失败教训 → 变成约束
+                memory_constraints.append(
+                    Constraint(kind="safety", rule=f"历史教训: {mem.content}", check="auto")
+                )
+            elif mem.memory_type == "knowledge":
+                # 已知事实 → 注入上下文
+                key = mem.entities[0] if mem.entities else "fact"
+                context[f"已知_{key}"] = mem.content
+
+        # 3. 将记忆注入规划 prompt
+        plan = self._model_plan(goal, context, memory_constraints)
+        return plan
+```
+
+**闭环**：
+```
+执行失败 → 记忆保存 → 下次规划检索到 → 自动注入约束 → 避免重复失败
+```
+
+### 10.5 DIKW 在 Harness 中的映射
+
+```
+Data (数据层):     "节点3磁盘使用率95%"         → on_step_complete 自动采集
+Information (信息层): "节点3在NCCL分发时磁盘满"   → on_step_failed 自动生成
+Knowledge (知识层): "磁盘满会导致分发失败"        → on_replan 生成，或巩固器从多条 info 合并
+Wisdom (智慧层):   "分发前检查目标环境是最佳实践"  → 巩固器从多次 knowledge 中抽象
+```
+
+### 10.6 完整记忆流转示例
+
+```
+第一次执行 "跑NCCL测试":
+  Step 2: 分发程序 → 节点3磁盘满
+  → MemoryObserver.on_step_failed:
+     保存 "节点3磁盘满，分发失败" (lesson, importance=0.8)
+
+第二次执行 "跑NCCL测试":
+  → Planner.plan:
+     搜索记忆 → 发现 "节点3磁盘满，分发失败"
+     → 自动注入约束: "历史教训: 节点3磁盘满，分发可能失败"
+     → Plan 调整: Step 1 增加 "检查节点3磁盘空间"
+  
+  Step 1: 检查磁盘 → 节点3已清理
+  Step 2: 分发程序 → ✅
+  → MemoryObserver.on_step_complete:
+     保存 "节点3磁盘已清理，分发成功" (info, importance=0.5)
+  → 巩固器后续合并两条记忆:
+     "节点3曾有磁盘满问题，已清理" (knowledge, importance=0.6)
+```
+
+---
+
+## 十一、与 v0.7.0 的衔接
 
 v0.6.0 建立了 Harness 框架，v0.7.0 在此基础上加入：
 
