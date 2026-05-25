@@ -84,17 +84,26 @@ class Executor:
                 # 5. 尝试重规划
                 if step.retry_count < step.max_retries:
                     step.retry_count += 1
-                    new_plan = self.replanner.replan(plan, step)
+                    replan_result = self.replanner.replan(plan, step)
 
                     if self.observer:
                         self.observer.on_replan(
                             plan, step,
-                            new_plan.get("_strategy", "retry"),
-                            new_plan.get("_new_steps", []),
+                            replan_result.get("_strategy", "retry"),
+                            replan_result.get("_new_steps", []),
                         )
 
-                    # 将新步骤加入计划
-                    self._merge_replanned_steps(plan, new_plan)
+                    # 将重规划的步骤替换到计划中
+                    new_steps = replan_result.get("_new_steps", [])
+                    for new_step in new_steps:
+                        # 找到失败步骤的位置，替换
+                        for i, s in enumerate(plan.steps):
+                            if s.id == new_step.id:
+                                plan.steps[i] = new_step
+                                break
+                        else:
+                            # 没有同ID的，追加
+                            plan.steps.append(new_step)
                 else:
                     # 重试次数用完，标记计划失败
                     plan.status = "failed"
@@ -131,8 +140,8 @@ class Executor:
             result = executor(args)
             return result
         else:
-            # 纯推理步骤 — 返回描述
-            return {"description": step.description, "type": "reasoning"}
+            # 纯推理步骤 — 返回描述作为结果
+            return {"output": step.description, "description": step.description, "type": "reasoning"}
 
     def _resolve_args(self, args: dict, context: dict) -> dict:
         """解析参数模板，替换 {{step_N.xxx}} 引用"""
@@ -169,22 +178,6 @@ class Executor:
         if isinstance(result, dict):
             return result
         return {"output": result}
-
-    def _merge_replanned_steps(self, plan: Plan, replan_result: dict):
-        """将重规划结果合并到计划中"""
-        new_steps = replan_result.get("_new_steps", [])
-        for new_step in new_steps:
-            # 找到合适的插入位置（失败步骤之后）
-            failed_idx = next(
-                (i for i, s in enumerate(plan.steps) if s.id == new_step.id),
-                len(plan.steps),
-            )
-            if failed_idx < len(plan.steps):
-                # 替换失败步骤
-                plan.steps[failed_idx] = new_step
-            else:
-                # 追加新步骤
-                plan.steps.append(new_step)
 
     @staticmethod
     def _default_confirm(reason: str) -> bool:

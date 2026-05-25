@@ -24,11 +24,12 @@ class MemoryObserver:
     def on_step_complete(self, step: Step, plan: Plan):
         """步骤成功完成 → 从结果中提取记忆"""
         result_text = self._format_step_result(step, plan)
-        memories = self.extractor.extract(result_text, context=plan.goal)
+        # extractor.extract 接受 (user_input, assistant_reply) 两个参数
+        memories = self.extractor.extract(plan.goal, result_text)
 
         for mem in memories:
             mem.importance = self._adjust_importance(mem, step, plan)
-            mem.source = f"harness:{plan.id}:{step.id}"
+            mem.tags.append(f"harness:{plan.id}:{step.id}")
             self.store.save(mem)
 
     def on_step_failed(self, step: Step, plan: Plan, error: str):
@@ -39,8 +40,8 @@ class MemoryObserver:
             memory_type="lesson",
             dikw_level="information",
             importance=0.8,
-            entities=self.extractor.extract_entities(error),
-            source=f"harness:{plan.id}:{step.id}",
+            entities=self.extractor._extract_entities(error, ""),
+            tags=[f"harness:{plan.id}:{step.id}"],
         )
         self.store.save(memory)
 
@@ -53,8 +54,8 @@ class MemoryObserver:
             memory_type="knowledge",
             dikw_level="knowledge",
             importance=0.7,
-            entities=self.extractor.extract_entities(failed_step.description),
-            source=f"harness:{plan.id}:replan",
+            entities=self.extractor._extract_entities(failed_step.description, ""),
+            tags=[f"harness:{plan.id}:replan"],
         )
         self.store.save(memory)
 
@@ -67,7 +68,7 @@ class MemoryObserver:
             dikw_level="knowledge",
             importance=0.9,
             entities=[],
-            source=f"harness:guardrail:{step.id}",
+            tags=[f"harness:guardrail:{step.id}"],
         )
         self.store.save(memory)
 
@@ -86,8 +87,8 @@ class MemoryObserver:
             memory_type="knowledge",
             dikw_level="knowledge",
             importance=importance,
-            entities=self.extractor.extract_entities(plan.goal),
-            source=f"harness:{plan.id}:summary",
+            entities=self.extractor._extract_entities(plan.goal, ""),
+            tags=[f"harness:{plan.id}:summary"],
         )
         self.store.save(memory)
 
