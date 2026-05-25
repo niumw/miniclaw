@@ -1,4 +1,4 @@
-"""三层路由 — 反射/直觉/深思 + 推荐工具"""
+"""三层路由 — 反射/直觉/深思 + 推荐工具 + Harness 触发"""
 
 from miniclaw.memory.store import MemoryStore
 from miniclaw.memory.retriever import MemoryRetriever
@@ -16,7 +16,7 @@ class Router:
     def route(self, user_input: str) -> dict:
         """
         路由用户输入到合适的处理层。
-        返回: {"layer": "reflex"|"intuition"|"deep", "rule": ..., "memories": ..., "tools": [...]}
+        返回: {"layer": "reflex"|"intuition"|"deep", "rule": ..., "memories": ..., "tools": [...], "harness": bool}
         """
         # 层1：反射 — 匹配规则
         matched_rules = self.store.match_rule(user_input)
@@ -26,6 +26,7 @@ class Router:
                 "rule": matched_rules[0],
                 "memories": [],
                 "tools": [],
+                "harness": False,
                 "reason": f"匹配反射规则: {matched_rules[0]['pattern']}",
             }
 
@@ -36,19 +37,24 @@ class Router:
                 "layer": "intuition",
                 "rule": None,
                 "memories": memories,
-                "tools": [],  # 直觉层不需要工具
+                "tools": [],
+                "harness": False,
                 "reason": f"记忆命中{len(memories)}条，置信度足够",
             }
 
         # 层3：深思 — 需要模型推理，推荐工具
         tools = self._recommend_tools(user_input)
+        complexity = self._assess_complexity(user_input)
+        needs_harness = complexity in ("medium", "complex")
 
         return {
             "layer": "deep",
             "rule": None,
-            "memories": memories,  # 仍然传入记忆作为参考
+            "memories": memories,
             "tools": tools,
-            "reason": "需要模型推理",
+            "harness": needs_harness,
+            "complexity": complexity,
+            "reason": f"需要模型推理 (复杂度: {complexity})",
         }
 
     def _should_direct_answer(self, question: str, memories: list[Memory]) -> bool:
@@ -103,3 +109,33 @@ class Router:
             tools.append("search_memory")
 
         return tools
+
+    def _assess_complexity(self, text: str) -> str:
+        """评估任务复杂度"""
+        text_lower = text.lower()
+
+        # 简单标志：单步操作
+        simple_signals = [
+            "是什么", "多少", "有没有", "查询", "读取", "帮我看看",
+            "告诉我", "是什么意思", "翻译", "解释一下",
+        ]
+        # 复杂标志：多步操作
+        complex_signals = [
+            "部署", "测试", "分析", "整理", "帮我完成", "跑一下", "检查所有",
+            "批量", "全部", "所有", "逐个", "依次", "自动化",
+            "搭建", "安装配置", "迁移", "升级",
+        ]
+        # 中等标志：需要工具但步骤少
+        medium_signals = [
+            "帮我写", "创建", "修改", "更新", "删除",
+            "检查", "对比", "比较", "整理",
+        ]
+
+        if any(s in text_lower for s in complex_signals):
+            return "complex"
+        elif any(s in text_lower for s in medium_signals):
+            return "medium"
+        elif any(s in text_lower for s in simple_signals):
+            return "simple"
+        else:
+            return "medium"  # 默认中等，让模型判断

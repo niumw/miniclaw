@@ -39,6 +39,12 @@ from miniclaw.memory.relations import auto_link_related
 from miniclaw.memory.router import Router
 from miniclaw.skills.http_fetch import HttpFetchSkill
 from miniclaw.skills.file_io import FileIOSkill
+from miniclaw.harness.planner import Planner
+from miniclaw.harness.executor import Executor
+from miniclaw.harness.guardrails import Guardrails
+from miniclaw.harness.replanner import Replanner
+from miniclaw.harness.reporter import Reporter
+from miniclaw.harness.memory_observer import MemoryObserver
 
 console = Console()
 
@@ -67,6 +73,13 @@ async def run_chat(config_path: str):
     router = Router(store=store, retriever=retriever)
     http_skill = HttpFetchSkill()
     file_skill = FileIOSkill()
+
+    # 初始化 Harness 引擎
+    guardrails = Guardrails()
+    replanner_h = Replanner()
+    observer = MemoryObserver(extractor=extractor, store=store)
+    reporter = Reporter()
+    planner = Planner(store=store, tool_names=list(TOOL_NAMES))
 
     # Tool 执行器映射
     tool_executors = {
@@ -128,6 +141,7 @@ async def run_chat(config_path: str):
         rule = route_result["rule"]
         route_memories = route_result["memories"]
         recommended_tools = route_result.get("tools", [])
+        needs_harness = route_result.get("harness", False)
 
         # 层1：反射
         if layer == "reflex":
@@ -143,7 +157,42 @@ async def run_chat(config_path: str):
                     store.update(mem.id, apply_count=mem.apply_count + 1)
             continue
 
-        # 层2/3：调模型（带双轨 tool use）
+        # 层2/3：判断是否走 Harness
+        if layer == "deep" and needs_harness:
+            # ── Harness 流程 ──
+            console.print(f"[dim]🧠 深思层 (Harness): {route_result['reason']}[/]")
+            console.print(f"[dim]📐 规划中...[/]\n")
+
+            plan = planner.plan(user_input, context={"memories": [m.summary for m in route_memories]})
+
+            # 显示计划
+            console.print(f"[bold]📋 执行计划:[/] {plan.goal}")
+            for step in plan.steps:
+                console.print(f"  ⏳ {step.id}: {step.description}")
+            if plan.constraints:
+                console.print(f"[dim]🔒 约束: {len(plan.constraints)}条[/]")
+            console.print()
+
+            # 执行
+            executor = Executor(
+                guardrails=guardrails,
+                replanner=replanner_h,
+                observer=observer,
+                tool_executors=tool_executors,
+            )
+
+            result = await executor.execute(plan)
+
+            # 报告
+            report = reporter.report(result, plan)
+            console.print(report)
+            console.print()
+
+            messages.append({"role": "user", "content": user_input})
+            messages.append({"role": "assistant", "content": report})
+            continue
+
+        # 层2/3：普通调模型（带双轨 tool use）
         memory_text = retriever.format_for_prompt(route_memories)
 
         send_messages = list(messages)
