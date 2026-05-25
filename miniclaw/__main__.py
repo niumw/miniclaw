@@ -3,6 +3,8 @@
 import os
 import sys
 
+from miniclaw import __version__
+
 
 def _ensure_utf8():
     """确保 stdin/stdout/stderr 使用 UTF-8 编码"""
@@ -28,7 +30,7 @@ def main():
     _ensure_utf8()
 
     if len(sys.argv) < 2 or sys.argv[1] in ("-h", "--help"):
-        print("🦫 MiniClaw v0.5.0")
+        print(f"🦫 MiniClaw v{__version__}")
         print()
         print("用法: python -m miniclaw [配置文件路径]")
         print("默认: python -m miniclaw miniclaw.toml")

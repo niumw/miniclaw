@@ -6,10 +6,11 @@ from miniclaw.memory.store import Memory
 
 # 实体提取模式（顺序重要：长模式优先匹配，避免子串重复）
 ENTITY_PATTERNS = [
-    re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+'),                         # URL
-    re.compile(r'(?<![.\d])\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d+)?(?![.\d])'),  # IP 或 IP:端口
-    re.compile(r'[\w.-]+@[\w.-]+\.\w+'),                                   # 邮箱
-    re.compile(r'(?:^|[\s，。,:：\u201c\u201d])([a-zA-Z][\w-]*(?:\.[\w-]+){1,}(?::\d+)?)'),  # 域名:端口
+    re.compile(r'https?://[^\s<>"{}|\\^`\[\]]+'),                                        # URL
+    re.compile(r'(?<![.\d\w-])\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}(?::\d+)?(?![.\d])'),   # IP 或 IP:端口
+    re.compile(r'[\w.-]+@[\w.-]+\.\w+'),                                                  # 邮箱
+    re.compile(r'(?<![.\w-])([a-zA-Z][\w-]*(?:\.[\w-]+){1,}(?::\d+)?)'),                 # 域名:端口 (db.example.com:3306, api.openai.com)
+    re.compile(r'(?:(?:工单号|编号|ID|id|订单号|序号)[:\s]*)(\d{3,})'),                      # 带前缀的纯数字ID
 ]
 
 # 专有名词提取：从"记住XX是YY"模式中提取

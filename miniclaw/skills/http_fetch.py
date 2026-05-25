@@ -4,6 +4,8 @@ import json
 import re
 from dataclasses import dataclass
 
+from miniclaw import __version__
+
 
 @dataclass
 class FetchResult:
@@ -42,7 +44,7 @@ class HttpFetchSkill:
         try:
             async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
                 resp = await client.get(url, headers={
-                    "User-Agent": "MiniClaw/0.5.0",
+                    "User-Agent": f"MiniClaw/{__version__}",
                     "Accept": "text/html,application/json,text/plain,*/*",
                 })
 
@@ -82,7 +84,7 @@ class HttpFetchSkill:
 
         try:
             req = urllib.request.Request(url, headers={
-                "User-Agent": "MiniClaw/0.5.0",
+                "User-Agent": f"MiniClaw/{__version__}",
                 "Accept": "text/html,application/json,text/plain,*/*",
             })
             with urllib.request.urlopen(req, timeout=timeout) as resp:
