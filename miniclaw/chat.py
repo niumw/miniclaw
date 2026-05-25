@@ -79,7 +79,36 @@ async def run_chat(config_path: str):
     replanner_h = Replanner()
     observer = MemoryObserver(extractor=extractor, store=store)
     reporter = Reporter()
-    planner = Planner(store=store, tool_names=list(TOOL_NAMES))
+
+    # Planner 的模型函数：同步包装异步调用
+    def _make_plan_model_fn(mid, key, url):
+        """创建规划用的模型调用函数"""
+        def fn(prompt: str) -> str:
+            import asyncio
+            from miniclaw.model import call_model_final
+            messages = [
+                {"role": "system", "content": "你是任务规划器，只输出JSON，不输出其他内容。"},
+                {"role": "user", "content": prompt},
+            ]
+            try:
+                loop = asyncio.get_event_loop()
+                if loop.is_running():
+                    # 在已有事件循环中，用线程池执行
+                    import concurrent.futures
+                    with concurrent.futures.ThreadPoolExecutor() as pool:
+                        future = pool.submit(
+                            asyncio.run,
+                            call_model_final(messages, mid, key, url),
+                        )
+                        return future.result(timeout=30)
+                else:
+                    return loop.run_until_complete(call_model_final(messages, mid, key, url))
+            except RuntimeError:
+                return asyncio.run(call_model_final(messages, mid, key, url))
+        return fn
+
+    plan_model_fn = _make_plan_model_fn(model_id, api_key, base_url)
+    planner = Planner(store=store, tool_names=list(TOOL_NAMES), model_fn=plan_model_fn)
 
     # Tool 执行器映射
     tool_executors = {

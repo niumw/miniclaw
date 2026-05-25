@@ -2,6 +2,7 @@
 
 import json
 from datetime import datetime, timezone
+from typing import Callable
 
 from miniclaw.harness.plan import Plan, Step, Constraint, DEFAULT_CONSTRAINTS
 from miniclaw.memory.store import MemoryStore
@@ -21,6 +22,7 @@ PLAN_PROMPT = """你是一个任务规划器。请将以下目标拆解为可执
 3. 标注哪些步骤需要用户确认（needs_confirm=true）
 4. 步骤数量控制在3-10步
 5. 每步指定使用的工具（tool），纯推理步骤 tool=null
+6. args 中可以使用模板变量引用前序步骤结果，格式为 {{step_N.字段名}}
 
 输出严格JSON格式（不要包裹在代码块中）：
 {{
@@ -41,22 +43,42 @@ PLAN_PROMPT = """你是一个任务规划器。请将以下目标拆解为可执
 
 
 class Planner:
-    """规划器：目标 → 步骤列表"""
+    """规划器：目标 → 步骤列表
 
-    def __init__(self, store: MemoryStore | None = None, tool_names: list[str] | None = None):
+    支持两种模式：
+    1. 模型拆解：调用 LLM 生成步骤（需要 model_fn）
+    2. 降级拆解：简单3步模板（模型不可用时）
+    """
+
+    def __init__(
+        self,
+        store: MemoryStore | None = None,
+        tool_names: list[str] | None = None,
+        model_fn: Callable[[str], str] | None = None,
+    ):
+        """
+        Args:
+            store: 记忆存储（用于检索历史教训/事实）
+            tool_names: 可用工具名称列表
+            model_fn: 模型调用函数，接收 prompt 返回文本。
+                      如果为 None，则降级为简单拆解。
+                      签名: (prompt: str) -> str  (同步)
+                      或:   (prompt: str) -> str  (异步，调用时 await)
+        """
         self.store = store
         self.tool_names = tool_names or [
             "read_file", "write_file", "list_dir",
             "search_memory", "save_memory", "fetch_url",
         ]
+        self.model_fn = model_fn
 
     def plan(self, goal: str, context: dict | None = None) -> Plan:
         """
-        将目标拆解为步骤。
+        将目标拆解为步骤（同步接口）。
 
         策略：
         1. 搜索相关记忆（历史教训 → 约束，已知事实 → 上下文）
-        2. 模型拆解（调用模型生成步骤）
+        2. 模型拆解 / 降级拆解
         3. 注入默认护栏
         4. 验证步骤依赖图无环
         """
@@ -77,6 +99,26 @@ class Planner:
                 plan.constraints.append(c)
 
         # 5. 验证
+        self._validate_plan(plan)
+
+        plan.status = "pending"
+        plan.created_at = datetime.now(timezone.utc).isoformat()
+
+        return plan
+
+    async def aplan(self, goal: str, context: dict | None = None) -> Plan:
+        """异步版本 — 支持异步 model_fn"""
+        context = context or {}
+
+        memory_constraints, memory_context = self._search_memory(goal)
+        merged_context = {**context, **memory_context}
+
+        plan = await self._amodel_plan(goal, merged_context, memory_constraints)
+
+        for c in DEFAULT_CONSTRAINTS:
+            if not any(c.rule == existing.rule for existing in plan.constraints):
+                plan.constraints.append(c)
+
         self._validate_plan(plan)
 
         plan.status = "pending"
@@ -105,9 +147,7 @@ class Planner:
         return constraints, context
 
     def _model_plan(self, goal: str, context: dict, memory_constraints: list[Constraint]) -> Plan:
-        """调用模型生成计划"""
-        from miniclaw.model import call_model_final
-
+        """调用模型生成计划（同步）"""
         memory_hints = ""
         if memory_constraints:
             memory_hints = "\n历史约束（必须遵守）：\n" + "\n".join(
@@ -121,20 +161,44 @@ class Planner:
             memory_hints=memory_hints,
         )
 
-        try:
-            # 用模型生成计划
-            # 注意：这里需要调用方提供 model 配置，暂时用简化版
-            raw = self._parse_plan_json(goal, context, memory_constraints)
-            return raw
-        except Exception:
-            # 模型不可用时，降级为简单拆解
-            return self._simple_plan(goal, context, memory_constraints)
+        if self.model_fn:
+            try:
+                raw_response = self.model_fn(prompt)
+                return self.plan_from_json(goal, raw_response, context)
+            except Exception:
+                pass
 
-    def _parse_plan_json(self, goal: str, context: dict, memory_constraints: list[Constraint]) -> Plan:
-        """解析模型输出的计划 JSON（由调用方注入模型结果后使用）"""
-        # 这个方法在 v0.6.0 中由 _model_plan 调用
-        # 实际使用时，模型返回的 JSON 会在这里解析
-        # 目前先用简单拆解作为默认
+        # 降级
+        return self._simple_plan(goal, context, memory_constraints)
+
+    async def _amodel_plan(self, goal: str, context: dict, memory_constraints: list[Constraint]) -> Plan:
+        """调用模型生成计划（异步）"""
+        memory_hints = ""
+        if memory_constraints:
+            memory_hints = "\n历史约束（必须遵守）：\n" + "\n".join(
+                f"- {c.rule}" for c in memory_constraints
+            )
+
+        prompt = PLAN_PROMPT.format(
+            goal=goal,
+            context=json.dumps(context, ensure_ascii=False, indent=2) if context else "{}",
+            available_tools=", ".join(self.tool_names),
+            memory_hints=memory_hints,
+        )
+
+        if self.model_fn:
+            try:
+                import asyncio
+                result = self.model_fn(prompt)
+                # 如果 model_fn 返回 coroutine，await 它
+                if asyncio.iscoroutine(result):
+                    raw_response = await result
+                else:
+                    raw_response = result
+                return self.plan_from_json(goal, raw_response, context)
+            except Exception:
+                pass
+
         return self._simple_plan(goal, context, memory_constraints)
 
     def _simple_plan(self, goal: str, context: dict, memory_constraints: list[Constraint]) -> Plan:
@@ -156,23 +220,34 @@ class Planner:
         """从 JSON 字符串构建计划（模型输出解析入口）"""
         context = context or {}
 
+        # 尝试直接解析
+        data = None
         try:
             data = json.loads(json_str)
         except json.JSONDecodeError:
-            # 尝试提取 JSON 块
+            # 尝试提取 JSON 块（模型可能包裹在 ```json 中）
             import re
-            match = re.search(r'\{[\s\S]*\}', json_str)
+            match = re.search(r'```(?:json)?\s*\n?([\s\S]*?)\n?```', json_str)
             if match:
-                data = json.loads(match.group())
-            else:
-                raise
+                try:
+                    data = json.loads(match.group(1))
+                except json.JSONDecodeError:
+                    pass
+            # 还不行，尝试找最外层的 { }
+            if data is None:
+                match = re.search(r'\{[\s\S]*\}', json_str)
+                if match:
+                    try:
+                        data = json.loads(match.group())
+                    except json.JSONDecodeError:
+                        raise ValueError(f"模型输出无法解析为 JSON: {json_str[:200]}")
 
         steps = []
         for i, s in enumerate(data.get("steps", [])):
             steps.append(Step(
                 id=s.get("id", f"step_{i+1}"),
                 description=s.get("description", f"步骤{i+1}"),
-                tool=s.get("tool"),
+                tool=s.get("tool") or None,  # 空字符串转 None
                 args=s.get("args", {}),
                 depends_on=s.get("depends_on", []),
                 needs_confirm=s.get("needs_confirm", False),
