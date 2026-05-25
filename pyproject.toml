@@ -1,6 +1,6 @@
 [project]
 name = "miniclaw"
-version = "0.4.0"
+version = "0.5.0"
 description = "A lightweight AI assistant with memory, DIKW layers, and three-layer routing"
 requires-python = ">=3.11"
 dependencies = [
